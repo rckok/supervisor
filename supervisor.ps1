@@ -1056,7 +1056,7 @@ function Remove-ProfileAliasMatches([array]$AliasMatches) {
 # ---------------------------------------------------------------------------
 function Invoke-Install {
     $liveAlias      = Get-Alias -Name $Alias -ErrorAction SilentlyContinue
-    $profileMatches = Get-ProfileAliasMatches -AliasName $Alias -TargetPath $null
+    $profileMatches = @(Get-ProfileAliasMatches -AliasName $Alias -TargetPath $null)
 
     $existingTarget = $null
     if ($liveAlias) { $existingTarget = $liveAlias.Definition }
@@ -1123,7 +1123,7 @@ function Invoke-Uninstall([bool]$ExplicitAlias) {
     }
 
     $aliasFilter    = if ($ExplicitAlias) { $Alias } else { $null }
-    $profileMatches = Get-ProfileAliasMatches -AliasName $aliasFilter -TargetPath $ScriptPath
+    $profileMatches = @(Get-ProfileAliasMatches -AliasName $aliasFilter -TargetPath $ScriptPath)
     if ($profileMatches.Count -gt 0) {
         Remove-ProfileAliasMatches -AliasMatches $profileMatches
         foreach ($m in $profileMatches) { $removed += $m.Name }
