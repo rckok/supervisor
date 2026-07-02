@@ -26,6 +26,8 @@
       list
       install-autostart
       uninstall-autostart
+      install    [-Alias <n>]
+      uninstall  [-Alias <n>]
 #>
 
 [CmdletBinding()]
@@ -41,6 +43,9 @@ param(
     [string]$Path,
     [string]$Arguments        = '',
     [string]$WorkingDirectory = '',
+
+    # For install/uninstall: alias name to create/remove (defaults to 'supervisor').
+    [string]$Alias = 'supervisor',
 
     [ValidateSet('Always', 'Never')]
     [string]$RestartPolicy = 'Always',
@@ -944,6 +949,200 @@ function Invoke-AutostartRun {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Profile alias helpers (used by install/uninstall)
+#
+# 'install' persists an alias by appending a marker-delimited block to
+# $PROFILE (CurrentUserCurrentHost) so it survives new sessions. These
+# helpers also recognise bare Set-Alias/New-Alias lines a user may have
+# added to their profile by hand, so 'uninstall' can find and remove those
+# too without being told the alias name.
+# ---------------------------------------------------------------------------
+function Get-ProfileAliasBlockMarker([string]$AliasName) {
+    return "# >>> Supervisor alias: $AliasName >>>", "# <<< Supervisor alias: $AliasName <<<"
+}
+
+function Get-ProfileAliasMatches([string]$AliasName, [string]$TargetPath) {
+    $results = @()
+    if (-not (Test-Path $PROFILE)) { return $results }
+
+    $lines = @(Get-Content -LiteralPath $PROFILE -Encoding UTF8)
+    $i = 0
+    while ($i -lt $lines.Count) {
+        $line = $lines[$i]
+
+        # --- Our own marker block ---
+        if ($line -match '^\s*#\s*>>>\s*Supervisor alias:\s*(.+?)\s*>>>\s*$') {
+            $blockName  = $Matches[1]
+            $endPattern = '^\s*#\s*<<<\s*Supervisor alias:\s*' + [regex]::Escape($blockName) + '\s*<<<\s*$'
+            $endIdx     = -1
+            for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+                if ($lines[$j] -match $endPattern) { $endIdx = $j; break }
+            }
+            if ($endIdx -ge 0) {
+                $innerTarget = $null
+                for ($k = $i + 1; $k -lt $endIdx; $k++) {
+                    if ($lines[$k] -match "-Value\s+['`"]([^'`"]+)['`"]") { $innerTarget = $Matches[1]; break }
+                }
+                $results += [pscustomobject]@{
+                    Name = $blockName; Target = $innerTarget
+                    StartLine = $i; EndLine = $endIdx; IsMarkerBlock = $true
+                }
+                $i = $endIdx + 1
+                continue
+            }
+        }
+
+        # --- Bare Set-Alias / New-Alias line (e.g. added by hand) ---
+        if ($line -notmatch '^\s*#' -and $line -match '^\s*(Set-Alias|New-Alias)\b') {
+            $name = $null; $target = $null
+            if ($line -match "-Name\s+['`"]?([^'`"\s]+)")  { $name   = $Matches[1] }
+            if ($line -match "-Value\s+['`"]?([^'`"\s]+)") { $target = $Matches[1] }
+            if ((-not $name) -or (-not $target)) {
+                if ($line -match '^\s*(?:Set-Alias|New-Alias)\s+(\S+)\s+(\S+)') {
+                    if (-not $name)   { $name   = $Matches[1].Trim("'`"") }
+                    if (-not $target) { $target = $Matches[2].Trim("'`"") }
+                }
+            }
+            if ($name -and $target) {
+                $results += [pscustomobject]@{
+                    Name = $name; Target = $target
+                    StartLine = $i; EndLine = $i; IsMarkerBlock = $false
+                }
+            }
+        }
+
+        $i++
+    }
+
+    if ($AliasName)  { $results = @($results | Where-Object { $_.Name -ieq $AliasName }) }
+    if ($TargetPath) { $results = @($results | Where-Object { $_.Target -and ($_.Target -ieq $TargetPath) }) }
+    return $results
+}
+
+function Remove-ProfileAliasMatches([array]$AliasMatches) {
+    if (-not $AliasMatches -or $AliasMatches.Count -eq 0) { return }
+    if (-not (Test-Path $PROFILE)) { return }
+
+    $lines       = @(Get-Content -LiteralPath $PROFILE -Encoding UTF8)
+    $removeLines = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($m in $AliasMatches) {
+        for ($k = $m.StartLine; $k -le $m.EndLine; $k++) { [void]$removeLines.Add($k) }
+    }
+
+    $kept = New-Object System.Collections.Generic.List[string]
+    for ($idx = 0; $idx -lt $lines.Count; $idx++) {
+        if (-not $removeLines.Contains($idx)) { $kept.Add($lines[$idx]) }
+    }
+
+    # Collapse consecutive blank lines left behind, and trim leading/trailing blanks.
+    $collapsed = New-Object System.Collections.Generic.List[string]
+    $prevBlank = $false
+    foreach ($l in $kept) {
+        $isBlank = [string]::IsNullOrWhiteSpace($l)
+        if ($isBlank -and $prevBlank) { continue }
+        $collapsed.Add($l)
+        $prevBlank = $isBlank
+    }
+    while ($collapsed.Count -gt 0 -and [string]::IsNullOrWhiteSpace($collapsed[0]))                  { $collapsed.RemoveAt(0) }
+    while ($collapsed.Count -gt 0 -and [string]::IsNullOrWhiteSpace($collapsed[$collapsed.Count-1])) { $collapsed.RemoveAt($collapsed.Count - 1) }
+
+    Set-Content -LiteralPath $PROFILE -Value $collapsed -Encoding UTF8
+}
+
+# ---------------------------------------------------------------------------
+# install -- creates an alias for this script, active immediately and
+# persisted to the user's PowerShell profile so it survives new sessions.
+# ---------------------------------------------------------------------------
+function Invoke-Install {
+    $liveAlias      = Get-Alias -Name $Alias -ErrorAction SilentlyContinue
+    $profileMatches = Get-ProfileAliasMatches -AliasName $Alias -TargetPath $null
+
+    $existingTarget = $null
+    if ($liveAlias) { $existingTarget = $liveAlias.Definition }
+    elseif ($profileMatches.Count -gt 0) { $existingTarget = $profileMatches[0].Target }
+
+    if ($existingTarget) {
+        if ($existingTarget -ieq $ScriptPath) {
+            Write-Host "Alias '$Alias' is already installed for $ScriptPath -- nothing to do."
+            return
+        }
+        throw "install: alias '$Alias' already exists and points to '$existingTarget'. Choose a different -Alias, or run 'uninstall -Alias $Alias' first."
+    }
+
+    # Active immediately in the current session (Global scope reaches the
+    # calling interactive shell, since running '.\supervisor.ps1 install'
+    # executes in a child scope of that same session).
+    Set-Alias -Name $Alias -Value $ScriptPath -Scope Global
+
+    # Persist so it survives new sessions.
+    $profileDir = Split-Path $PROFILE -Parent
+    if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
+    if (-not (Test-Path $PROFILE))    { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
+
+    $startMarker, $endMarker = Get-ProfileAliasBlockMarker $Alias
+    $block = @(
+        $startMarker
+        "Set-Alias -Name '$Alias' -Value '$ScriptPath'"
+        $endMarker
+    )
+    Add-Content -LiteralPath $PROFILE -Value $block -Encoding UTF8
+
+    Write-Host "Alias '$Alias' created for $ScriptPath (active now; persisted in $PROFILE for new sessions)"
+}
+
+# ---------------------------------------------------------------------------
+# uninstall -- removes an alias for this script, from both the current
+# session and the user's PowerShell profile.
+#
+# Without -Alias: removes every alias (session + profile) pointing at this
+# script, however it was created -- including ones added by hand.
+# With -Alias <n>: restricts removal to that specific alias name.
+# ---------------------------------------------------------------------------
+function Invoke-Uninstall([bool]$ExplicitAlias) {
+    $removed            = @()
+    $skippedWrongTarget = $false
+
+    if ($ExplicitAlias) {
+        $liveAlias = Get-Alias -Name $Alias -ErrorAction SilentlyContinue
+        if ($liveAlias) {
+            if ($liveAlias.Definition -ieq $ScriptPath) {
+                Remove-Item -Path "Alias:$Alias" -Force
+                $removed += $Alias
+            } else {
+                Write-Host "Alias '$Alias' points to '$($liveAlias.Definition)', not this script -- not removing."
+                $skippedWrongTarget = $true
+            }
+        }
+    } else {
+        $liveMatches = @(Get-Alias | Where-Object { $_.Definition -ieq $ScriptPath })
+        foreach ($a in $liveMatches) {
+            Remove-Item -Path "Alias:$($a.Name)" -Force
+            $removed += $a.Name
+        }
+    }
+
+    $aliasFilter    = if ($ExplicitAlias) { $Alias } else { $null }
+    $profileMatches = Get-ProfileAliasMatches -AliasName $aliasFilter -TargetPath $ScriptPath
+    if ($profileMatches.Count -gt 0) {
+        Remove-ProfileAliasMatches -AliasMatches $profileMatches
+        foreach ($m in $profileMatches) { $removed += $m.Name }
+    }
+
+    $removed = @($removed | Select-Object -Unique)
+    foreach ($name in $removed) {
+        Write-Host "Alias '$name' removed for $ScriptPath"
+    }
+
+    if ($removed.Count -eq 0 -and -not $skippedWrongTarget) {
+        if ($ExplicitAlias) {
+            Write-Host "Alias '$Alias' not found (or does not point to this script)."
+        } else {
+            Write-Host "No alias found pointing to $ScriptPath"
+        }
+    }
+}
+
 # ===========================================================================
 # ENTRY POINT
 # ===========================================================================
@@ -962,6 +1161,8 @@ if (-not (Test-Path $SupervisorRoot)) {
 
 # --- CLI dispatch -----------------------------------------------------------
 switch ($Command.ToLower()) {
+    'install'   { Invoke-Install }
+    'uninstall' { Invoke-Uninstall -ExplicitAlias:($PSBoundParameters.ContainsKey('Alias')) }
     'register' { Invoke-Register }
     'unregister' {
         if ($All) {
@@ -1018,6 +1219,13 @@ Commands:
 
   install-autostart               (register Scheduled Task for logon)
   uninstall-autostart
+
+  install    [-Alias <n>]         (create alias, default 'supervisor'; active now
+                                   and persisted to $PROFILE for new sessions;
+                                   errors if that name is already taken elsewhere)
+  uninstall  [-Alias <n>]         (no -Alias: remove every alias -- session and
+                                   $PROFILE, however it was created -- that points
+                                   at this script. With -Alias: remove only that one)
 
 Status states:
   Running          -- app process is alive

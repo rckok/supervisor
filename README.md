@@ -13,6 +13,9 @@ are visible. Child processes are cleaned up via Job Objects — no orphans.
 ## Install
 
 Copy `supervisor.ps1` anywhere. No installation step — just run it.
+To make the script available under an alias, run `supervisor.ps1 install`. This creates an alias `supervisor`, active immediately and persisted to your PowerShell profile (`$PROFILE`) so it survives new sessions. If that name already points somewhere else, `install` errors out rather than overwriting it. You can specify a different `-Alias` or `uninstall` the conflicting one first. Re-running `install` for an alias that already points at this script is a no-op.
+Pass `-Alias <n>` to either command to use a different alias name, e.g. `supervisor.ps1 install -Alias sv`.
+Run `supervisor uninstall` (or use whichever alias you've previously set) to remove every alias pointing to the supervisor script, both in the current session and in `$PROFILE`, however it was created (including one added by hand). Pass `-Alias <n>` to remove only that specific alias.
 
 If your execution policy blocks scripts, run this once in an elevated shell:
 
@@ -101,19 +104,21 @@ Stopped
 
 ## Command reference
 
-| Command                                 | Description                                                   |
-| --------------------------------------- | ------------------------------------------------------------- |
-| `register -Name <n> -Path <exe> [opts]` | Add/update an app entry                                       |
-| `unregister -Name <n>` / `unregister -All` | Stop the app and remove it                                 |
-| `set -Name <n> [opts]`                  | Partial update (no restart needed)                            |
-| `start -Name <n>` / `start -All`        | Spawn the supervisor (clears stop flag and terminal state)    |
-| `stop -Name <n>` / `stop -All`          | Graceful stop; app stays down (status: Stopped)               |
-| `restart -Name <n>` / `restart -All`    | Cycle the app regardless of policy                            |
-| `info [-Name <n>]`                      | Full detail block per app (status, PIDs, uptime, last exit)   |
-| `status [-Name <n>]`                    | Status string only — prefixed with name when no `-Name` given |
-| `list`                                  | One-line summary of all registered apps                       |
-| `install-autostart`                     | Register logon Scheduled Task                                 |
-| `uninstall-autostart`                   | Remove the Scheduled Task                                     |
+| Command                                    | Description                                                     |
+| ------------------------------------------ | --------------------------------------------------------------- |
+| `register -Name <n> -Path <exe> [opts]`    | Add/update an app entry                                         |
+| `unregister -Name <n>` / `unregister -All` | Stop the app and remove it                                      |
+| `set -Name <n> [opts]`                     | Partial update (no restart needed)                              |
+| `start -Name <n>` / `start -All`           | Spawn the supervisor (clears stop flag and terminal state)      |
+| `stop -Name <n>` / `stop -All`             | Graceful stop; app stays down (status: Stopped)                 |
+| `restart -Name <n>` / `restart -All`       | Cycle the app regardless of policy                              |
+| `info [-Name <n>]`                         | Full detail block per app (status, PIDs, uptime, last exit)     |
+| `status [-Name <n>]`                       | Status string only — prefixed with name when no `-Name` given   |
+| `list`                                     | One-line summary of all registered apps                         |
+| `install-autostart`                        | Register logon Scheduled Task                                   |
+| `uninstall-autostart`                      | Remove the Scheduled Task                                       |
+| `install [-Alias <n>]`                     | Create + persist a CLI alias (default `supervisor`)             |
+| `uninstall [-Alias <n>]`                   | Remove alias(es) pointing at this script (default: all of them) |
 
 ### register / set options
 
